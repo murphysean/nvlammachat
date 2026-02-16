@@ -17,7 +17,7 @@ Using [packer.nvim](https://github.com/wbthomason/packer.nvim):
 use {
   'your-username/ollama-nvim',
   config = function()
-    require('ollama-nvim').setup({
+    require('nvchatto').setup({
       host = "192.168.254.37",  -- Your Ollama server IP
       port = 11434,
       model = "qwen3:4b"

@@ -6,11 +6,11 @@ local function get_target_buffer(file_path, original_buf)
   if not file_path then
     return original_buf or 0
   end
-  
+
   -- Make path relative to working directory
   local cwd = vim.fn.getcwd()
   local full_path = vim.fn.fnamemodify(cwd .. "/" .. file_path, ":p")
-  
+
   -- Check if file is already open in a buffer
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     local buf_name = vim.api.nvim_buf_get_name(buf)
@@ -18,7 +18,7 @@ local function get_target_buffer(file_path, original_buf)
       return buf
     end
   end
-  
+
   -- Open the file in a new buffer
   local buf = vim.fn.bufnr(full_path, true)
   if vim.fn.filereadable(full_path) == 1 then
@@ -30,52 +30,52 @@ end
 -- Execute a tool
 function M.execute(tool_name, args, original_buf)
   local target_buf = get_target_buffer(args.file, original_buf)
-  
+
   if tool_name == "get_lines" then
     local start_line = args.start_line or 1
     local end_line = args.end_line or vim.api.nvim_buf_line_count(target_buf)
     local lines = vim.api.nvim_buf_get_lines(target_buf, start_line - 1, end_line, false)
-    local file_info = args.file and (" from " .. args.file) or ""
+    local _ = args.file and (" from " .. args.file) or ""
     return table.concat(lines, "\n") .. (args.file and ("\n-- End of " .. args.file) or "")
-    
+
   elseif tool_name == "replace_lines" then
     local start_line = args.start_line or 1
     local end_line = args.end_line or start_line
     local lines = args.lines or {}
     vim.api.nvim_buf_set_lines(target_buf, start_line - 1, end_line, false, lines)
-    
+
     -- Trigger LSP diagnostics update
     vim.schedule(function()
       vim.diagnostic.reset(nil, target_buf)
       -- Trigger buffer change event for LSP
       vim.api.nvim_exec_autocmds("TextChanged", {buffer = target_buf})
     end)
-    
+
     local file_info = args.file and (" in " .. args.file) or ""
     return string.format("Replaced lines %d-%d with %d new lines%s", start_line, end_line, #lines, file_info)
-    
+
   elseif tool_name == "insert_lines" then
     local line_num = args.line_num or 1
     local lines = args.lines or {}
     vim.api.nvim_buf_set_lines(target_buf, line_num - 1, line_num - 1, false, lines)
-    
+
     -- Trigger LSP diagnostics update
     vim.schedule(function()
       vim.diagnostic.reset(nil, target_buf)
       -- Trigger buffer change event for LSP
       vim.api.nvim_exec_autocmds("TextChanged", {buffer = target_buf})
     end)
-    
+
     local file_info = args.file and (" in " .. args.file) or ""
     return string.format("Inserted %d lines at line %d%s", #lines, line_num, file_info)
-    
+
   elseif tool_name == "get_diagnostics" then
     local diagnostics = vim.diagnostic.get(target_buf)
     if #diagnostics == 0 then
       local file_info = args.file and (" in " .. args.file) or ""
       return "No diagnostics found" .. file_info
     end
-    
+
     local file_info = args.file and (" for " .. args.file) or ""
     local result = {"LSP Diagnostics" .. file_info .. ":"}
     local severity_names = {"ERROR", "WARN", "INFO", "HINT"}
@@ -89,16 +89,16 @@ function M.execute(tool_name, args, original_buf)
       end
     end
     return table.concat(result, "\n")
-    
+
   elseif tool_name == "get_structure" then
     local result = {}
-    
+
     -- Try LSP document symbols first
     local clients = vim.lsp.get_clients({bufnr = target_buf})
     if #clients > 0 then
       local params = {textDocument = vim.lsp.util.make_text_document_params(target_buf)}
       local symbols = vim.lsp.buf_request_sync(target_buf, 'textDocument/documentSymbol', params, 1000)
-      
+
       if symbols and symbols[1] and symbols[1].result then
         table.insert(result, "LSP Document Symbols:")
         for _, symbol in ipairs(symbols[1].result) do
@@ -107,13 +107,13 @@ function M.execute(tool_name, args, original_buf)
         end
       end
     end
-    
+
     -- Fallback to simple pattern matching
     if #result == 0 then
       table.insert(result, "File Structure (pattern-based):")
       local lines = vim.api.nvim_buf_get_lines(target_buf, 0, -1, false)
       for i, line in ipairs(lines) do
-        if line:match("^%s*function%s+([%w_]+)") or 
+        if line:match("^%s*function%s+([%w_]+)") or
            line:match("^%s*def%s+([%w_]+)") or
            line:match("^%s*class%s+([%w_]+)") or
            line:match("^%s*#%s*(.+)$") or
@@ -123,27 +123,27 @@ function M.execute(tool_name, args, original_buf)
         end
       end
     end
-    
+
     return table.concat(result, "\n")
-    
+
   elseif tool_name == "search_workspace" then
     local pattern = args.pattern
     local file_pattern = args.file_pattern or ""
     local case_flag = args.case_sensitive and "" or "-i"
     local cwd = vim.fn.getcwd()
-    
+
     local cmd = string.format("cd %s && rg %s --line-number --column --no-heading --color=never %s %s",
       vim.fn.shellescape(cwd),
       case_flag,
       vim.fn.shellescape(pattern),
       file_pattern ~= "" and vim.fn.shellescape(file_pattern) or "")
-    
+
     local output = vim.fn.system(cmd)
-    
+
     if vim.v.shell_error ~= 0 then
       return "No matches found for pattern: " .. pattern
     end
-    
+
     -- Limit output to first 50 matches
     local lines = vim.split(output, "\n")
     local result_lines = {"Search results for '" .. pattern .. "':"}
@@ -152,14 +152,14 @@ function M.execute(tool_name, args, original_buf)
         table.insert(result_lines, lines[i])
       end
     end
-    
+
     if #lines > 50 then
       table.insert(result_lines, string.format("\n... (%d more matches)", #lines - 50))
     end
-    
+
     return table.concat(result_lines, "\n")
   end
-  
+
   return "Unknown tool: " .. tool_name
 end
 
