@@ -2,9 +2,9 @@
 local M = {}
 
 M.defaults = {
-  host = "192.168.254.37",
-  port = 11434,
+  base_url = "http://localhost:11434",
   model = "qwen3:4b",
+  api_key = nil,  -- Optional: API key for cloud providers (e.g., ollama.com). Falls back to $OLLAMA_API_KEY env var
   timeout = 30000,
   think = true,
   num_ctx = nil  -- Context length (tokens), nil = use model default

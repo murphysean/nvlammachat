@@ -1,16 +1,9 @@
 vim.api.nvim_create_user_command(
-  "OllamaChat",
+  "NVChatto",
   function()
-    require('nvchatto').chat_with_context()
+    require('nvchatto').toggle()
   end,
-  { desc = "Begin a chat with your configured LLM"}
-)
-vim.api.nvim_create_user_command(
-  "OllamaContinue",
-  function()
-    require('nvchatto').continue_chat()
-  end,
-  { desc = "Continue the current chat"}
+  { desc = "Toggle NVChatto window" }
 )
 
 if not vim.g.nvchatto_is_setup then

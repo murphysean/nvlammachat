@@ -35,8 +35,15 @@ function M.execute(tool_name, args, original_buf)
     local start_line = args.start_line or 1
     local end_line = args.end_line or vim.api.nvim_buf_line_count(target_buf)
     local lines = vim.api.nvim_buf_get_lines(target_buf, start_line - 1, end_line, false)
-    local _ = args.file and (" from " .. args.file) or ""
-    return table.concat(lines, "\n") .. (args.file and ("\n-- End of " .. args.file) or "")
+
+    -- Include line numbers for confident editing
+    local numbered_lines = {}
+    for i, line in ipairs(lines) do
+      table.insert(numbered_lines, string.format("%6d | %s", start_line + i - 1, line))
+    end
+
+    local file_info = args.file and (" from " .. args.file) or ""
+    return table.concat(numbered_lines, "\n") .. "\n-- Lines " .. start_line .. "-" .. (start_line + #lines - 1) .. file_info
 
   elseif tool_name == "replace_lines" then
     local start_line = args.start_line or 1

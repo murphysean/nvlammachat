@@ -15,7 +15,7 @@ end
 -- Process streaming chunk
 local function process_chunk(json_data)
   if json_data.error then
-    ui.append_to_popup(conversation.state, "API Error: " .. json_data.error)
+    ui.append_to_popup(conversation.state, "\n\n## ❌ Error\n" .. tostring(json_data.error) .. "\n")
     return
   end
 
@@ -133,7 +133,10 @@ function M.continue_conversation()
 
   conversation.state.sent_tokens = total_tokens
 
-  ui.append_to_popup(conversation.state, string.format("📤 Sending: %d tokens (system: %d, user: %d, assistant: %d, tool: %d)\n\n",
+  local url = config.config.base_url .. "/api/chat"
+
+  ui.append_to_popup(conversation.state, string.format("\n## 📤 Request\n🔗 %s | 🤖 %s\n📊 %d tokens (system: %d, user: %d, assistant: %d, tool: %d)\n",
+    config.config.base_url, config.config.model,
     total_tokens, token_counts.system, token_counts.user, token_counts.assistant, token_counts.tool))
 
   local payload_data = {
@@ -149,103 +152,80 @@ function M.continue_conversation()
   end
 
   local payload = vim.fn.json_encode(payload_data)
-  local url = string.format("http://%s:%d/api/chat", config.config.host, config.config.port)
-
-  ui.append_to_popup(conversation.state, "🔄 Sending request to Ollama...\n")
 
   http.stream_request(url, payload, process_chunk,
     function(tool_calls)
       ui.append_to_popup(conversation.state, "\n✅ Request Completed\n")
 
       if tool_calls and #tool_calls > 0 then
-        for _, tool_call in ipairs(tool_calls) do
-          local func_data = tool_call["function"]
-          if func_data then
-            local reason = func_data.arguments.reason or "No reason provided"
-            local confirm = vim.fn.confirm("Execute " .. func_data.name .. "?\nReason: " .. reason, "&Yes\n&No", 1)
-            if confirm == 1 then
-              ui.append_to_popup(conversation.state, "\n\n## 🔧 Tool Execution\n")
-              ui.append_to_popup(conversation.state, "Executing " .. func_data.name .. "...\n")
-              local result = tools.execute(func_data.name, func_data.arguments, conversation.state.original_buf)
-              ui.append_to_popup(conversation.state, "Result: " .. result .. "\n")
+        ui.append_to_popup(conversation.state, "\n## 🔧 Tool Requests Pending Approval\n")
 
-              table.insert(conversation.state.messages, {
-                role = "tool",
-                tool_call_id = tool_call.id,
-                content = result,
-                tokens = conversation.estimate_tokens(result)
-              })
-
-              vim.defer_fn(M.continue_conversation, 500)
+        -- Use interactive tool approval
+        ui.process_tool_calls(tool_calls, conversation.state.original_buf, function(results)
+          for _, result in ipairs(results) do
+            if result.approved then
+              ui.append_to_popup(conversation.state, string.format("\n✓ %s: Approved\n", result.name))
+              ui.append_to_popup(conversation.state, "Result: " .. result.content .. "\n")
             else
-              ui.append_to_popup(conversation.state, "\n\n## 🔧 Tool Execution\nTool execution declined\n")
-              table.insert(conversation.state.messages, {
-                role = "tool",
-                tool_call_id = tool_call.id,
-                content = "Tool execution declined by user",
-                tokens = conversation.estimate_tokens("Tool execution declined by user")
-              })
+              ui.append_to_popup(conversation.state, string.format("\n✗ %s: %s\n", result.name, result.content))
             end
+
+            table.insert(conversation.state.messages, {
+              role = "tool",
+              tool_call_id = result.tool_call_id,
+              content = result.content,
+              tokens = conversation.estimate_tokens(result.content)
+            })
           end
-        end
+
+          -- Continue conversation after all tools processed
+          vim.defer_fn(M.continue_conversation, 100)
+        end)
       end
     end
   )
 end
 
--- Continue existing conversation
-function M.continue_chat()
-  if not conversation.state.active then
-    vim.notify("No active conversation. Start with :OllamaChat", vim.log.levels.WARN)
+-- Submit input from input buffer
+function M.submit_input()
+  if not conversation.state.input_buf or not vim.api.nvim_buf_is_valid(conversation.state.input_buf) then
     return
   end
 
-  local user_input = vim.fn.input("Continue chat: ")
+  local lines = vim.api.nvim_buf_get_lines(conversation.state.input_buf, 0, -1, false)
+  local user_input = table.concat(lines, "\n")
+
   if user_input == "" then return end
 
-  table.insert(conversation.state.messages, {
-    role = "user",
-    content = user_input,
-    tokens = conversation.estimate_tokens(user_input)
-  })
+  -- Clear input buffer
+  vim.api.nvim_buf_set_lines(conversation.state.input_buf, 0, -1, false, {})
+
+  -- Add user message to conversation
+  if not conversation.state.active then
+    M.initialize_conversation(user_input)
+  else
+    ui.append_to_popup(conversation.state, "\n\n## 🧑 User\n" .. user_input .. "\n\n")
+    table.insert(conversation.state.messages, {
+      role = "user",
+      content = user_input,
+      tokens = conversation.estimate_tokens(user_input)
+    })
+  end
+
   M.continue_conversation()
 end
 
--- Get buffer context
-local function get_buffer_context()
-  local cursor_pos = vim.api.nvim_win_get_cursor(0)
-  local buf_name = vim.api.nvim_buf_get_name(0)
-  local cwd = vim.fn.getcwd()
-
-  return {
-    current_line = cursor_pos[1],
-    cursor_col = cursor_pos[2],
-    buffer_name = buf_name,
-    working_directory = cwd,
-    total_lines = vim.api.nvim_buf_line_count(0)
-  }
-end
-
--- Chat with buffer context
-function M.chat_with_context()
-  local user_input = vim.fn.input("Chat: ")
-  if user_input == "" then return end
-
-  -- Check if window is still valid, reset if not
-  if conversation.state.active and conversation.state.win and not vim.api.nvim_win_is_valid(conversation.state.win) then
-    conversation.state.active = false
-    conversation.state.buf = nil
-    conversation.state.win = nil
+-- Initialize conversation with system prompt
+function M.initialize_conversation(user_input)
+  -- Don't overwrite original_buf if already set (it's captured when window opens)
+  if not conversation.state.original_buf or not vim.api.nvim_buf_is_valid(conversation.state.original_buf) then
+    conversation.state.original_buf = vim.api.nvim_get_current_buf()
   end
 
-  -- Initialize conversation if not active
-  if not conversation.state.active then
-    local context = get_buffer_context()
-    conversation.state.original_buf = vim.api.nvim_get_current_buf()
-    conversation.state.buf, conversation.state.win = ui.create_popup()
-    conversation.state.active = true
+  local context = M.get_buffer_context()
+  conversation.state.active = true
 
-    local context_info = string.format([[You are an AI coding assistant integrated into Neovim. Your role is to help developers by analyzing code, fixing issues, and enhancing their IDE experience using available tools.
+  local context_info = string.format([[You are an AI coding assistant integrated into Neovim. Your role is to help developers by analyzing code, fixing issues, and enhancing their IDE experience using available tools.
 
 CURRENT CONTEXT:
 - File: %s
@@ -255,7 +235,7 @@ CURRENT CONTEXT:
 
 WORKFLOW - Follow these steps for each request:
 1. ANALYZE: Use get_structure and get_diagnostics to understand the current state
-2. READ: Use get_lines to examine relevant code sections  
+2. READ: Use get_lines to examine relevant code sections
 3. PLAN: Think through the solution approach
 4. ACT: Use replace_lines or insert_lines to make changes
 5. VERIFY: Check your changes make sense in context
@@ -276,39 +256,105 @@ RESPONSE STYLE:
 
 Use tools systematically to provide the best assistance.]], context.buffer_name, context.current_line, context.cursor_col, context.total_lines, context.working_directory)
 
-    conversation.state.messages = {
-      {
-        role = "system",
-        content = context_info,
-        tokens = conversation.estimate_tokens(context_info)
-      }
+  conversation.state.messages = {
+    {
+      role = "system",
+      content = context_info,
+      tokens = conversation.estimate_tokens(context_info)
     }
+  }
 
-    ui.append_to_popup(conversation.state, "## 🧑 User\n" .. user_input .. "\n\n")
-  else
-    ui.append_to_popup(conversation.state, "\n\n## 🧑 User\n" .. user_input .. "\n\n")
-  end
+  ui.append_to_popup(conversation.state, "## 🧑 User\n" .. user_input .. "\n\n")
 
   table.insert(conversation.state.messages, {
     role = "user",
     content = user_input,
     tokens = conversation.estimate_tokens(user_input)
   })
-  M.continue_conversation()
+end
+
+-- Get buffer context from the original buffer (not nvchatto buffers)
+function M.get_buffer_context()
+  local buf = conversation.state.original_buf
+
+  -- Fallback to current buffer if no original buffer
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    buf = vim.api.nvim_get_current_buf()
+  end
+
+  local buf_name = vim.api.nvim_buf_get_name(buf)
+  local cwd = vim.fn.getcwd()
+
+  -- Try to find a window for this buffer to get cursor position
+  local cursor_line = 1
+  local cursor_col = 0
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(win) == buf then
+      local pos = vim.api.nvim_win_get_cursor(win)
+      cursor_line = pos[1]
+      cursor_col = pos[2]
+      break
+    end
+  end
+
+  return {
+    current_line = cursor_line,
+    cursor_col = cursor_col,
+    buffer_name = buf_name,
+    working_directory = cwd,
+    total_lines = vim.api.nvim_buf_line_count(buf)
+  }
+end
+
+-- Toggle window - main entry point
+function M.toggle()
+  ui.toggle_window()
+end
+
+-- Continue existing conversation (for backward compatibility)
+function M.continue_chat()
+  if not conversation.state.active then
+    vim.notify("No active conversation. Start with :NVChatto", vim.log.levels.WARN)
+    return
+  end
+
+  -- Ensure window is visible
+  if not conversation.state.visible then
+    ui.toggle_window()
+  end
+
+  -- Focus input window
+  if conversation.state.input_win and vim.api.nvim_win_is_valid(conversation.state.input_win) then
+    vim.api.nvim_set_current_win(conversation.state.input_win)
+  end
 end
 
 -- Commands
-vim.api.nvim_create_user_command('OllamaChat', M.chat_with_context, {})
-vim.api.nvim_create_user_command('OllamaContinue', M.continue_chat, {})
+vim.api.nvim_create_user_command('NVChatto', M.toggle, { desc = 'Toggle NVChatto window' })
 
 -- Keymaps
-vim.keymap.set('n', '<leader>oc', M.chat_with_context, { desc = 'Ollama Chat' })
+vim.keymap.set('n', '<leader>oc', M.toggle, { desc = 'Toggle NVChatto window' })
 
--- Autocmd to clean up on window close
+-- Autocmd to handle window close
 vim.api.nvim_create_autocmd("WinClosed", {
-  callback = function()
-    if conversation.state.win and not vim.api.nvim_win_is_valid(conversation.state.win) then
-      conversation.reset()
+  callback = function(args)
+    local closed_win = tonumber(args.match)
+
+    -- If one of our windows is closed externally, close the other too
+    if closed_win == conversation.state.win then
+      if conversation.state.input_win and vim.api.nvim_win_is_valid(conversation.state.input_win) then
+        vim.api.nvim_win_close(conversation.state.input_win, true)
+      end
+      conversation.state.win = nil
+      conversation.state.input_win = nil
+      conversation.state.visible = false
+    elseif closed_win == conversation.state.input_win then
+      if conversation.state.win and vim.api.nvim_win_is_valid(conversation.state.win) then
+        vim.api.nvim_win_close(conversation.state.win, true)
+      end
+      conversation.state.win = nil
+      conversation.state.input_win = nil
+      conversation.state.visible = false
     end
   end
 })
